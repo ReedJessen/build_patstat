@@ -1,0 +1,210 @@
+#!/bin/bash
+# Build Patstat2017b SQLite database
+# See readme.md for detailed use information including structure of
+# input directory
+# 
+# Usage:
+# build_patstat2017b <input_directory>"
+# 
+# Options:
+# -o <file>     Output SQLite database (default: patstat2017b.db)"
+# -h            This help message"
+#
+# Note: This script uses a mix of Bash Script and Python with Pandas.
+#
+# Copyright (C) 2017 Christopher Yellick
+#
+# This script is provided under a two clause BSD license; it is
+# provided "as is" and without any express or implied warranties.
+# See LICENSE for full license agreement.
+
+set -o nounset  # Exit on undeclared variable use
+set -o errexit  # Exit on command fail
+
+
+database_file="patstat2017b.db"    # Default output file
+input_directory=$1
+
+while getopts ":o:h" opt; do
+    case $opt in
+        o)
+            database_file=$OPTARG
+            ;;
+        h)
+            echo "Build Patstat2017b SQLite database"
+            echo "See readme.md for detailed use information including structure of"
+            echo "input directory"
+            echo ""
+            echo "Usage:"
+            echo "build_patstat2017b <input_directory>"
+            echo ""
+            echo "Options:"
+            echo "-o <file>     Output SQLite database (default: patstat2017b.db)"
+            echo "-h            This help message"
+            exit 1
+    esac
+done
+
+# Remove database file if it exists
+if [ -f $database_file ] ; then
+    rm $database_file
+    echo "Removed existing database file $database_file"
+fi
+
+# Create SQLite database
+sqlite3 $database_file < ./patstat2017b_tables.sql
+echo "Created new database file $database_file"
+
+# Check SHA1 hashes of zip files in input directory
+for f in $input_directory**/*.zip
+do
+    calculated_hash=$(shasum $f | cut -f 1 -d " ")    
+    provided_hash=$(cat $f.SHA-1.txt | tr [:upper:] [:lower:])
+
+    if [ "$calculated_hash" == "$provided_hash" ] ; then
+        echo "SHA 1 hash confirmed for $f"
+    else
+        echo "SHA 1 hash does not match for $f"
+        exit 1
+    fi
+done
+
+#Extract files to temporary directory
+tmp_dir=./$(python  -c 'import uuid; print(uuid.uuid4())')
+mkdir $tmp_dir
+echo "Created temporary directory $tmp_dir"
+for f in $input_directory**/*.zip
+do
+    unzip $f -d $tmp_dir
+done
+
+# Load function (Uses Python with Pandas to read csv files and load to SQLite)
+function load {
+ZIP_PATH="$tmp_dir" TABLE_TO_LOAD=$1 DB_PATH="$database_file" python - <<END
+import glob
+import os
+import pandas as pd
+import sqlite3
+import zipfile
+
+from patstat2017b_tables_and_defaults import COLUMN_DEFAULTS, TABLE_NAMES
+
+
+zip_path = os.environ['ZIP_PATH']
+table_to_load = os.environ['TABLE_TO_LOAD']
+db_path = os.environ['DB_PATH']
+
+for zipfile_path in glob.glob(zip_path + '/**/*.zip', recursive=True):
+    table_prefix = os.path.basename(zipfile_path).split('_')[0]
+    if table_prefix == table_to_load:
+
+        # Extract txt file from zip
+        dir_name = os.path.dirname(zipfile_path)
+        with zipfile.ZipFile(zipfile_path, 'r') as z:
+            z.extractall(dir_name)
+        print('{0} extracted to {1}'.format(zipfile_path, dir_name))
+        
+        # Load csv file to pandas Dataframe and fill NaNs with defaults
+        txtfile_path = zipfile_path[:-4] + '.txt'
+        df = pd.read_csv(txtfile_path, dtype='str', engine='c', encoding='utf-8')
+        df.fillna(COLUMN_DEFAULTS[table_prefix], axis=0, inplace=True)
+        print('{0} Loaded from CSV to DataFrame'.format(txtfile_path))
+        
+        # Load dataframe to Sqlite3 database
+        conn = sqlite3.connect(db_path)
+        table_name = TABLE_NAMES[table_prefix]
+        df.to_sql(table_name, conn, if_exists='append', index=False)
+        print('{0} Loaded from DataFrame to SQLite'.format(txtfile_path))
+        conn.close()
+        
+        # Remove txt file
+        os.remove(txtfile_path)
+        print('Removed {0}'.format(txtfile_path))
+END
+}
+
+# Load each table to database
+# By default tls203 (abstract) and tls206 (redundant of tls906) are
+# not loaded; uncomment their respective lines to load them.  If tls203
+# or tls206 are loaded; the respective row count tests should be 
+# uncommented below as well.
+load tls201
+load tls202
+#load tls203
+load tls204
+load tls205
+#load tls206
+load tls207
+load tls209
+load tls210
+load tls211
+load tls212
+load tls214
+load tls215
+load tls216
+load tls222
+load tls223
+load tls224
+load tls226
+load tls227
+load tls228
+load tls229
+load tls230
+load tls231
+load tls801
+load tls803
+load tls901
+load tls902
+load tls904
+load tls906
+
+# Remove temporary directory
+rm -r $tmp_dir
+
+# Create indexes
+sqlite3 $database_file < ./patstat2017b_indexes.sql
+echo "Indexes built"
+
+# Test row counts
+function check_count {
+    count=$(sqlite3 patstat2017b.db "SELECT COUNT(*) FROM $1")
+    if [ $count == $2 ] ; then
+        echo "Count of $1 matches EPO provided count"
+    else
+        echo "Count of $1 does not match EPO provided count"
+        exit 1
+    fi
+}
+
+check_count tls201_appln 91738066
+check_count tls202_appln_title 72486891
+# check_count tls203_appln_abstr 49133801
+check_count tls204_appln_prior 39730627
+check_count tls205_tech_rel 4092486
+# check_count tls206_person 55601405
+check_count tls207_pers_appln 217993472
+check_count tls209_appln_ipc 227484083
+check_count tls210_appln_n_cls 25788528
+check_count tls211_pat_publn 106202165
+check_count tls212_citation 273371080
+check_count tls214_npl_publn 34971774
+check_count tls215_citn_categ 45450583
+check_count tls216_appln_contn 3079656
+check_count tls222_appln_jp_class 334118081
+check_count tls223_appln_docus 39008391
+check_count tls224_appln_cpc 205135275
+check_count tls226_person_orig 64588088
+check_count tls227_pers_publn 266045610
+check_count tls228_docdb_fam_citn 150222683
+check_count tls229_appln_nace2  105145274
+check_count tls230_appln_techn_field  105496717
+check_count tls231_inpadoc_legal_event 225613207
+check_count tls801_country 236
+check_count tls803_legal_event_code 4221
+check_count tls901_techn_field_ipc 757
+check_count tls902_ipc_nace2 850
+check_count tls904_nuts 1484
+check_count tls906_person 55601405
+
+# Finished building database
+echo "Patstat2017b database successfully built"
